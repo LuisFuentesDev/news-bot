@@ -1,0 +1,27 @@
+# Entorno virtual
+.venv/
+bin/
+include/
+lib/
+pyvenv.cfg
+
+# Configuración sensible
+.env
+
+# Base de datos local (historial de publicaciones)
+posted.db
+
+# Logs
+*.log
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache/
+
+# Archivos temporales del sistema/IDE
+.DS_Store
+.vscode/
+.idea/
