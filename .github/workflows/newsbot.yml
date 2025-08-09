@@ -2,11 +2,15 @@ name: NewsBot (cada hora)
 
 on:
   schedule:
-    - cron: "0 * * * *"     # ejecuta cada hora (minuto 0) en UTC
-  workflow_dispatch:        # permite lanzarlo manualmente
+    - cron: "0 * * * *"        # cada hora (UTC)
+  workflow_dispatch:           # ejecutarlo manualmente
 
 permissions:
-  contents: write           # para commitear posted.db (estado)
+  contents: write              # necesario para commitear posted.db
+
+concurrency:
+  group: newsbot-hourly
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -29,19 +33,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # (Opcional) fija zona horaria solo para logs
-      - name: TZ America/Santiago
-        run: sudo timedatectl set-timezone America/Santiago
+      - name: Ejecutar bot (guardar log)
+        run: |
+          set -e
+          python automation_news.py > cron.log 2>&1
+          echo "----- FIN EJECUCIÓN -----" >> cron.log
 
-      - name: Ejecutar bot
-        run: python automation_news.py
+      - name: Subir log como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cron-log
+          path: cron.log
+          retention-days: 7
 
-      # Mantener historial/rotación en Actions (commitea posted.db del runner)
       - name: Commit estado (posted.db)
         run: |
           git config user.name "newsbot-bot"
           git config user.email "newsbot-bot@users.noreply.github.com"
-          git add -f posted.db
+          git add -f posted.db || true
           git diff --cached --quiet || git commit -m "Update posted.db [ci skip]"
+
       - name: Push
         run: git push
