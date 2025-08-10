@@ -23,20 +23,36 @@ CATEGORY_ORDER = ["REGIONAL", "NACIONAL", "INTERNACIONAL", "DEPORTES"]
 # ---- FEEDS por categoría ----
 FEEDS_BY_CATEGORY = {
     "REGIONAL": [
-        "https://rss.app/feeds/MAgTVCRXwboo1wpZ.xml",
-        "https://rss.app/feeds/CYNJPggNEkFxnne0.xml"
+        "https://www.biobiochile.cl/noticias/feed",  # BioBioChile
+        "https://www.soychile.cl/rss",  # SoyChile (regional)
+        "https://www.latercera.com/etiqueta/regiones/feed/",  # La Tercera Regiones
+        "https://www.elrancaguino.cl/feed/",  # El Rancagüino
+        "https://www.australosorno.cl/rss",  # Austral de Osorno
+        "https://www.australtemuco.cl/rss",  # Austral de Temuco
     ],
     "NACIONAL": [
-        "https://rss.app/feeds/KXD7V1vwEsU5FFoc.xml",
-        "https://rss.app/feed/QuPZil06i75x4J0b",
+        "https://www.latercera.com/feed/",  # La Tercera
+        "https://www.emol.com/rss/rss.asp",  # Emol Noticias
+        "https://cooperativa.cl/rss/",  # Cooperativa
+        "https://cnnchile.com/feed/",  # CNN Chile
+        "https://www.t13.cl/rss",  # T13
+        "https://www.adnradio.cl/rss",  # ADN Radio
     ],
     "INTERNACIONAL": [
-        "https://rss.app/feeds/gWh6Ibrm0CzSX2qZ.xml",
-        "https://rss.app/feeds/tipE19EolhTiyutE.xml",
+        "http://feeds.bbci.co.uk/mundo/rss.xml",  # BBC Mundo
+        "https://cnnespanol.cnn.com/feed/",  # CNN Español
+        "https://elpais.com/tag/rss/eeuu/a",  # El País - EEUU
+        "https://elpais.com/tag/rss/union_europea/a",  # El País - UE
+        "https://www.dw.com/overlay/rss",  # Deutsche Welle
+        "https://www.infobae.com/america/feed",  # Infobae América
     ],
     "DEPORTES": [
-        "https://rss.app/feeds/24FkKxNQEXFjnS3c.xml",
-        "https://rss.app/feeds/mrcUDGUfBSKUZVCA.xml",
+        "https://www.espn.com/espn/rss/news",  # ESPN general
+        "https://www.espn.com/espn/rss/soccer/news",  # ESPN fútbol
+        "https://www.ole.com.ar/rss/ultimas-noticias/",  # Olé
+        "https://www.marca.com/rss/portada.xml",  # Marca
+        "https://chile.as.com/rss/",  # Diario AS Chile
+        "https://www.latercera.com/categoria/deportes/feed/",  # LT Deportes
     ],
 }
 
