@@ -236,71 +236,39 @@ def to_jpeg_bytes(img_url):
     return buf.read()
 
 def summarize_html(html, max_words=1000):
-    """
-    Extrae el cuerpo manteniendo párrafos reales.
-    - Quita autores/creditos/metadatos (solo al primer párrafo).
-    - Elimina imágenes/figures/etc.
-    - Devuelve string con párrafos separados por DOBLE salto de línea.
-    """
     doc = Document(html)
     article_html = doc.summary()
     soup = BeautifulSoup(article_html, "html.parser")
-    soup = strip_author_nodes(soup)
 
-    # Remueve ruido visual
-    for bad in soup(["script","style","aside","footer","nav","figure","figcaption","noscript","img","picture","source"]):
+    # Elimina autores, imágenes y basura
+    soup = strip_author_nodes(soup)
+    for bad in soup(["script", "style", "aside", "footer", "nav", 
+                     "figure", "figcaption", "noscript", "img", "picture", "source"]):
         bad.decompose()
 
-    # Recolecta párrafos "reales"
-    paras = []
-    for el in soup.find_all(["p", "li", "h2", "h3"]):
-        t = re.sub(r"\s+", " ", el.get_text(" ", strip=True))
-        # descarta líneas demasiado cortas/sin letras
-        if len(t) < 40 or sum(ch.isalpha() for ch in t) < 10:
+    # Recorre párrafos y limpia texto
+    total_words = 0
+    clean_paragraphs = []
+    for p in soup.find_all("p"):
+        text = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
+        text = strip_byline_prefix(text)
+        text = strip_leading_metadata(text)
+        words = text.split()
+        if not words:
             continue
-        paras.append(t)
-
-    # Fallback si no encontró párrafos
-    if not paras:
-        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
-        if not text:
-            return ""
-        # split por puntos con mayúscula como aproximación
-        chunks = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', text)
-        paras = [c.strip() for c in chunks if len(c.strip()) > 0]
-
-    # Limpieza de byline/metadata SOLO en el primer párrafo
-    if paras:
-        first = paras[0]
-        first = strip_byline_prefix(first)
-        first = strip_leading_metadata(first)
-        paras[0] = first
-
-    # Limita por cantidad total de palabras manteniendo párrafos
-    out, total = [], 0
-    for p in paras:
-        w = p.split()
-        if total + len(w) > max_words:
-            # recorta el párrafo final si se pasa
-            remain = max_words - total
-            if remain > 8:  # no agregues un mini fragmento
-                out.append(" ".join(w[:remain]).rstrip(" ."))
+        if total_words + len(words) > max_words:
+            words = words[:max_words - total_words]
+        total_words += len(words)
+        clean_paragraphs.append(" ".join(words))
+        if total_words >= max_words:
             break
-        out.append(p.rstrip(" ."))
-        total += len(w)
 
-    return "\n\n".join(out)
+    return clean_paragraphs
 
-
-def build_post_html(summary: str) -> str:
-    # Si ya viene con doble salto, respétalo. Si no, intenta separar por oración.
-    parts = re.split(r'\n\s*\n|(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', summary)
-    html_paragraphs = []
-    for p in parts:
-        p = p.strip()
-        if p:
-            html_paragraphs.append(f"<p style='text-align:justify;'>{p}</p>")
-    return "<div class='winf-body'>" + "".join(html_paragraphs) + "</div>"
+def build_post_html(paragraphs):
+    return "<div class='winf-body'>" + "".join(
+        f"<p style='text-align:justify;'>{p}</p>" for p in paragraphs
+    ) + "</div>"
 
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
