@@ -1,4 +1,4 @@
-# automation_news.py — 1 por categoría/hora + v2 tweets + contador writes mensual
+# automation_news.py — rotación por categoría + limpieza autor + sin imágenes en cuerpo + tweet v2 con límite mensual
 import os, re, io, time, hashlib, sqlite3, datetime
 from urllib.parse import urljoin
 import requests, feedparser
@@ -17,8 +17,8 @@ POST_MODE = os.getenv("POST_MODE", "summary")  # summary | full_html
 LANG = os.getenv("LANG", "es")
 
 # Tweets
-TW_ENABLED = os.getenv("TW_ENABLED", "1")              # "1" o "0"
-TW_MONTHLY_LIMIT = int(os.getenv("TW_MONTHLY_LIMIT", "500"))  # límite plan Free por defecto
+TW_ENABLED = os.getenv("TW_ENABLED", "1")                 # "1" para habilitar, "0" para desactivar sin tocar código
+TW_MONTHLY_LIMIT = int(os.getenv("TW_MONTHLY_LIMIT", "500"))  # Free plan: 500 writes/mes
 
 assert WP_URL and WP_USER and WP_APP_PASSWORD, "Faltan WP_URL/WP_USER/WP_APP_PASSWORD en .env"
 
@@ -180,7 +180,7 @@ def get_tw_writes(conn):
 def can_tweet(conn):
     _ensure_month(conn)
     count = get_tw_writes(conn)
-    return count < TW_MONTHLY_LIMIT and TW_ENABLED == "1"
+    return TW_ENABLED == "1" and count < TW_MONTHLY_LIMIT
 
 def record_tweet_success(conn):
     c = get_tw_writes(conn) + 1
@@ -303,8 +303,8 @@ def build_post_html(paragraphs):
 # ---------- Tweets (v2) ----------
 def tweet_news(title: str, url: str) -> bool:
     """
-    Publica un tweet por API v2.
-    Devuelve True si se publicó; False si faltan credenciales, está desactivado o falló.
+    Publica un tweet por API v2. True si se publicó; False si faltan credenciales,
+    está desactivado o falló.
     """
     if TW_ENABLED != "1":
         print("[X] Tweet desactivado por TW_ENABLED.")
@@ -391,12 +391,9 @@ def normalize_title_case(raw: str) -> str:
     return out
 
 # ---------- Publicación ----------
-def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
+def publish_one_for_category(conn, category_name, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
-    publicados = 0
-    for entry in pick_entry_for_category(category_name, max_per_feed=15):
-        if publicados >= n:
-            break
+    for entry in pick_entry_for_category(category_name):
         title = normalize_title_case(entry.get("title") or "(Sin título)")
         link = entry.get("link")
         if not link or already_posted(conn, link):
@@ -406,6 +403,7 @@ def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
+
         media_id = None
         try:
             cover = extract_og_image(html, final_url)
@@ -413,6 +411,7 @@ def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
                 media_id = wp_upload_media(to_jpeg_bytes(cover), "portada.jpg")
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
+
         if POST_MODE == "full_html":
             soup = BeautifulSoup(Document(html).summary(), "html.parser")
             soup = strip_author_nodes(soup)
@@ -420,8 +419,9 @@ def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
                 tag.decompose()
             content_html = str(soup)
         else:
-            paragraphs = summarize_html(html, max_words=1000)
-            content_html = build_post_html(paragraphs)
+            summary = summarize_html(html, max_words=1000)
+            content_html = build_post_html(summary)
+
         try:
             post_id, post_link = wp_create_post(
                 title, content_html,
@@ -432,56 +432,37 @@ def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
             mark_posted(conn, link)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # Tweet (si hay cupo y link)
+            # ---- Tweet después de publicar en WP ----
             if publish_status == "publish" and post_link:
                 if can_tweet(conn):
                     if tweet_news(title, post_link):
-                        new_count = record_tweet_success(conn)
-                        print(f"[X] Writes usados este mes: {new_count}/{TW_MONTHLY_LIMIT}")
-                        time.sleep(5)  # pausa solo tras éxito
+                        used = record_tweet_success(conn)
+                        print(f"[X] Writes usados este mes: {used}/{TW_MONTHLY_LIMIT}")
+                        time.sleep(5)  # pausa solo tras éxito real
                 else:
                     used = get_tw_writes(conn)
-                    print(f"[X] Límite mensual alcanzado ({used}/{TW_MONTHLY_LIMIT}). Omite tweet.")
+                    print(f"[X] Límite mensual alcanzado ({used}/{TW_MONTHLY_LIMIT}). Omite tweet hasta reset mensual.")
 
-            publicados += 1
+            return True
         except Exception as e:
             print(f"[ERROR] Falló publicar '{title}' en {category_name}: {e}")
             continue
 
-    if publicados == 0:
-        print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
-    else:
-        print(f"[INFO] Publicados {publicados} en {category_name}.")
-    return publicados
+    print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
+    return False
 
-def run_all_categories_once(publish_status="publish"):
-    """
-    Publica 1 noticia por categoría en una sola ejecución (ideal cron cada hora).
-    """
-    conn = init_db()
-    try:
-        total_pub = 0
-        for cat in CATEGORY_ORDER:
-            total_pub += publish_n_for_category(conn, cat, n=1, publish_status=publish_status)
-        used = get_tw_writes(conn)
-        print(f"[RESUMEN] Publicados total={total_pub}. Tweets usados este mes: {used}/{TW_MONTHLY_LIMIT}.")
-        return total_pub
-    finally:
-        conn.close()
-
-# (mantengo la función de rotación por si quieres usarla en otro cron)
 def run_rotating_once(publish_status="publish"):
     conn = init_db()
     try:
         idx = int(get_state(conn, "rotation_idx", "0")) % len(CATEGORY_ORDER)
         cat = CATEGORY_ORDER[idx]
-        publicados = publish_n_for_category(conn, cat, n=2, publish_status=publish_status)
+        ok = publish_one_for_category(conn, cat, publish_status=publish_status)
         next_idx = (idx + 1) % len(CATEGORY_ORDER)
         set_state(conn, "rotation_idx", str(next_idx))
-        return (publicados > 0), cat, idx, next_idx
+        return ok, cat, idx, next_idx
     finally:
         conn.close()
 
 if __name__ == "__main__":
-    # Ejecuta 1 por categoría (4 posts por corrida si tienes 4 categorías)
-    run_all_categories_once(publish_status="publish")
+    ok, cat, idx, nxt = run_rotating_once(publish_status="publish")
+    print(f"[ROTATION] idx={idx} cat={cat} -> next={nxt}")
