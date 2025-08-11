@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import tweepy
 import shutil
+import unicodedata
 
 load_dotenv()
 
@@ -61,6 +62,46 @@ HEADERS_JSON = {"Accept": "application/json", "Content-Type": "application/json"
 HEADERS_BIN = {"Accept": "application/json", "User-Agent": "NewsBot/1.0"}
 AUTH = (WP_USER, WP_APP_PASSWORD)
 
+def make_seo_title(title: str, max_len=60) -> str:
+    t = " ".join(title.split())
+    return (t[:max_len-1] + "…") if len(t) > max_len else t
+
+def make_meta_description(paragraphs, max_len=160) -> str:
+    base = " ".join(paragraphs[:2]) if paragraphs else ""
+    base = " ".join(base.split())
+    return (base[:max_len-1] + "…") if len(base) > max_len else base
+
+def slugify(text: str) -> str:
+    t = unicodedata.normalize('NFKD', text).encode('ascii','ignore').decode('ascii')
+    t = re.sub(r'[^a-z0-9\- ]+', '', t.lower()).strip()
+    t = re.sub(r'\s+', '-', t)
+    t = re.sub(r'-{2,}', '-', t)
+    return t[:90] or "nota"
+
+HASHTAGS = {
+    "REGIONAL": ["#Chile", "#Regional"],
+    "NACIONAL": ["#Chile", "#Nacional"],
+    "INTERNACIONAL": ["#Internacional"],
+    "DEPORTES": ["#Deportes"],
+}
+
+def add_utm(u: str, **utm) -> str:
+    s = urlsplit(u)
+    q = dict(parse_qsl(s.query, keep_blank_values=True))
+    q.update(utm)
+    return urlunsplit((s.scheme, s.netloc, s.path, urlencode(q), s.fragment))
+
+def build_tweet_text(title: str, url: str, cat: str) -> str:
+    # UTM solo para X (no afecta dedupe; marcas con la canonical final)
+    url_utm = add_utm(url, utm_source="x", utm_medium="social", utm_campaign="newsbot")
+    tags = HASHTAGS.get(cat, [])
+    base = f"{title}\n{url_utm}"
+    if tags:
+        tail = " " + " ".join(tags[:2])  # 1–2 hashtags máx
+        if len(base) + len(tail) <= 280:
+            base += tail
+    return base[:280]
+
 # ---------- HTTP POST con redirecciones seguras ----------
 def _post_with_redirect(url, *, json=None, data=None, headers=None, max_hops=3):
     current = url
@@ -102,8 +143,11 @@ def get_or_create_category_id_exact(name):
     return wp_create_category(name)
 
 # ---------- Posts / Media ----------
-def wp_create_post(title, html_content, featured_media_id=None, status="draft", category_id=None):
+def wp_create_post(title, html_content, featured_media_id=None, status="draft",
+                   category_id=None, excerpt=None, slug=None):
     payload = {"title": title, "content": html_content, "status": status}
+    if excerpt: payload["excerpt"] = excerpt
+    if slug: payload["slug"] = slug
     if category_id: payload["categories"] = [category_id]
     if featured_media_id: payload["featured_media"] = featured_media_id
     last_r = None
@@ -284,12 +328,20 @@ def extract_og_image(html, base_url):
     img = soup.find("img", src=True)
     return urljoin(base_url, img["src"]) if img else None
 
-def to_jpeg_bytes(img_url):
+def to_jpeg_bytes(img_url, target_w=1200, target_h=630):
     r = requests.get(img_url, headers=HEADERS, timeout=20)
     r.raise_for_status()
     im = Image.open(io.BytesIO(r.content)).convert("RGB")
+
+    # Escala manteniendo proporción y recorta centrado a 1200x630
+    scale = max(target_w / im.width, target_h / im.height)
+    new = im.resize((int(im.width * scale), int(im.height * scale)), Image.LANCZOS)
+    left = max(0, (new.width - target_w) // 2)
+    top  = max(0, (new.height - target_h) // 2)
+    new = new.crop((left, top, left + target_w, top + target_h))
+
     buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=85, optimize=True)
+    new.save(buf, format="JPEG", quality=85, optimize=True, progressive=True)
     buf.seek(0)
     return buf.read()
 
@@ -324,11 +376,7 @@ def build_post_html(paragraphs):
     ) + "</div>"
 
 # ---------- Tweets (v2) ----------
-def tweet_news(title: str, url: str) -> bool:
-    """
-    Publica un tweet por API v2. True si se publicó; False si faltan credenciales,
-    está desactivado o falló.
-    """
+def tweet_news(text: str) -> bool:
     if TW_ENABLED != "1":
         print("[X] Tweet desactivado por TW_ENABLED.")
         return False
@@ -341,10 +389,6 @@ def tweet_news(title: str, url: str) -> bool:
         print("[X] Credenciales de X no configuradas; omito tweet.")
         return False
 
-    text = f"{title}\n{url}"
-    if len(text) > 280:
-        text = text[:277] + "…"
-
     try:
         client = tweepy.Client(
             consumer_key=ck,
@@ -352,7 +396,7 @@ def tweet_news(title: str, url: str) -> bool:
             access_token=at,
             access_token_secret=ats
         )
-        resp = client.create_tweet(text=text)
+        resp = client.create_tweet(text=text[:280])
         ok = bool(getattr(resp, "data", None) and resp.data.get("id"))
         if ok:
             print(f"[X] Tweet enviado: id={resp.data.get('id')}")
@@ -515,6 +559,7 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
 
+        # Imagen destacada (redimensionada 1200x630 para X)
         media_id = None
         try:
             cover = extract_og_image(html, final_url_norm)
@@ -523,33 +568,44 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
 
-        # Genera el contenido
+        # --- Genera el contenido del post ---
         if POST_MODE == "full_html":
             soup = BeautifulSoup(Document(html).summary(), "html.parser")
             soup = strip_author_nodes(soup)
             for tag in soup.find_all(["img", "picture", "source", "figure", "figcaption"]):
                 tag.decompose()
             content_html = str(soup)
+            # Para meta description tomamos los <p> ya limpios
+            paragraphs_for_desc = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
         else:
             summary = summarize_html(html, max_words=1000)
             content_html = build_post_html(summary)
+            paragraphs_for_desc = summary
+
+        # --- SEO: title/description/slug ---
+        seo_title = make_seo_title(title)
+        meta_desc = make_meta_description(paragraphs_for_desc)
+        slug = slugify(title)
 
         try:
             post_id, post_link = wp_create_post(
-                title, content_html,
+                seo_title, content_html,
                 featured_media_id=media_id,
                 status=publish_status,
-                category_id=cat_id
+                category_id=cat_id,
+                excerpt=meta_desc,
+                slug=slug
             )
 
             # Marca como publicada usando la URL final normalizada
             mark_posted(conn, final_url_norm)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # Tweet si está habilitado
+            # --- Tweet optimizado (hashtags + UTM) con límite mensual ---
             if publish_status == "publish" and post_link:
                 if can_tweet(conn):
-                    if tweet_news(title, post_link):
+                    tweet_text = build_tweet_text(seo_title, post_link, category_name)
+                    if tweet_news(tweet_text):
                         used = record_tweet_success(conn)
                         print(f"[X] Writes usados este mes: {used}/{TW_MONTHLY_LIMIT}")
                         time.sleep(5)
