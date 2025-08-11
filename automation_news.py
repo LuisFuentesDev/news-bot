@@ -6,6 +6,8 @@ from bs4 import BeautifulSoup
 from readability import Document
 from PIL import Image
 from dotenv import load_dotenv
+import tweepy
+
 
 load_dotenv()
 
@@ -276,6 +278,29 @@ def build_post_html(paragraphs):
         f"<p style='text-align:justify;'>{p}</p>" for p in paragraphs
     ) + "</div>"
 
+def tweet_news(title: str, url: str):
+    """Publica un tweet con el título y link. Si faltan credenciales, se salta."""
+    ck  = os.getenv("TW_CONSUMER_KEY")
+    cs  = os.getenv("TW_CONSUMER_SECRET")
+    at  = os.getenv("TW_ACCESS_TOKEN")
+    ats = os.getenv("TW_ACCESS_TOKEN_SECRET")
+
+    if not all([ck, cs, at, ats]):
+        print("[X] Credenciales de X no configuradas; omito tweet.")
+        return
+
+    try:
+        auth = tweepy.OAuth1UserHandler(ck, cs, at, ats)
+        api = tweepy.API(auth)
+
+        text = f"{title}\n{url}"
+        if len(text) > 280:
+            text = text[:277] + "…"
+        api.update_status(text)
+        print(f"[X] Tweet enviado: {text}")
+    except Exception as e:
+        print(f"[X ERROR] No se pudo publicar en X: {e}")
+
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
     feeds = FEEDS_BY_CATEGORY.get(cat_name, [])
@@ -341,19 +366,27 @@ def normalize_title_case(raw: str) -> str:
     return out
 
 # ---------- Publicación ----------
-def publish_one_for_category(conn, category_name, publish_status="publish"):
+def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
-    for entry in pick_entry_for_category(category_name):
+    publicados = 0
+
+    for entry in pick_entry_for_category(category_name, max_per_feed=15):
+        if publicados >= n:
+            break
+
         title = normalize_title_case(entry.get("title") or "(Sin título)")
         link = entry.get("link")
         if not link or already_posted(conn, link):
             continue
+
+        # Descarga artículo
         try:
             html, final_url = fetch_url(link)
         except Exception as e:
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
 
+        # Imagen destacada (opcional)
         media_id = None
         try:
             cover = extract_og_image(html, final_url)
@@ -362,6 +395,7 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
 
+        # Cuerpo (respetando párrafos)
         if POST_MODE == "full_html":
             soup = BeautifulSoup(Document(html).summary(), "html.parser")
             soup = strip_author_nodes(soup)
@@ -369,9 +403,10 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
                 tag.decompose()
             content_html = str(soup)
         else:
-            summary = summarize_html(html, max_words=1000)
-            content_html = build_post_html(summary)
+            paragraphs = summarize_html(html, max_words=1000)
+            content_html = build_post_html(paragraphs)
 
+        # Crear post y tuitear
         try:
             post_id, post_link = wp_create_post(
                 title, content_html,
@@ -381,23 +416,38 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
             )
             mark_posted(conn, link)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
-            return True
+
+            # Tweet (con un pequeño respiro para no parecer spam)
+            if publish_status == "publish" and post_link:
+                tweet_news(title, post_link)
+                time.sleep(5)
+
+            publicados += 1
         except Exception as e:
             print(f"[ERROR] Falló publicar '{title}' en {category_name}: {e}")
             continue
 
-    print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
-    return False
+    if publicados == 0:
+        print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
+    else:
+        print(f"[INFO] Publicados {publicados} en {category_name}.")
+
+    return publicados
 
 def run_rotating_once(publish_status="publish"):
     conn = init_db()
     try:
         idx = int(get_state(conn, "rotation_idx", "0")) % len(CATEGORY_ORDER)
         cat = CATEGORY_ORDER[idx]
-        ok = publish_one_for_category(conn, cat, publish_status=publish_status)
+
+        # Publica 2 en la categoría de turno
+        publicados = publish_n_for_category(conn, cat, n=2, publish_status=publish_status)
+
+        # avanza la rotación igual
         next_idx = (idx + 1) % len(CATEGORY_ORDER)
         set_state(conn, "rotation_idx", str(next_idx))
-        return ok, cat, idx, next_idx
+
+        return (publicados > 0), cat, idx, next_idx
     finally:
         conn.close()
 

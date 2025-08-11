@@ -4,3 +4,4 @@ beautifulsoup4
 readability-lxml
 Pillow
 python-dotenv
+tweepy
