@@ -1,5 +1,5 @@
-# automation_news.py — rotación por categoría + limpieza autor + sin imágenes en cuerpo
-import os, re, io, time, hashlib, sqlite3
+# automation_news.py — 1 por categoría/hora + v2 tweets + contador writes mensual
+import os, re, io, time, hashlib, sqlite3, datetime
 from urllib.parse import urljoin
 import requests, feedparser
 from bs4 import BeautifulSoup
@@ -7,7 +7,6 @@ from readability import Document
 from PIL import Image
 from dotenv import load_dotenv
 import tweepy
-
 
 load_dotenv()
 
@@ -17,6 +16,10 @@ WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD")
 POST_MODE = os.getenv("POST_MODE", "summary")  # summary | full_html
 LANG = os.getenv("LANG", "es")
 
+# Tweets
+TW_ENABLED = os.getenv("TW_ENABLED", "1")              # "1" o "0"
+TW_MONTHLY_LIMIT = int(os.getenv("TW_MONTHLY_LIMIT", "500"))  # límite plan Free por defecto
+
 assert WP_URL and WP_USER and WP_APP_PASSWORD, "Faltan WP_URL/WP_USER/WP_APP_PASSWORD en .env"
 
 # ---- ORDEN DE ROTACIÓN ----
@@ -25,26 +28,26 @@ CATEGORY_ORDER = ["REGIONAL", "NACIONAL", "INTERNACIONAL", "DEPORTES"]
 # ---- FEEDS por categoría ----
 FEEDS_BY_CATEGORY = {
     "REGIONAL": [
-        "https://www.soychile.cl/rss",  # SoyChile (regional),
-        "https://rss.app/feeds/CYNJPggNEkFxnne0.xml", # Araucania Noticias
-        "https://rss.app/feeds/MAgTVCRXwboo1wpZ.xml", # Tiempo 21
+        "https://www.soychile.cl/rss",
+        "https://rss.app/feeds/CYNJPggNEkFxnne0.xml",
+        "https://rss.app/feeds/MAgTVCRXwboo1wpZ.xml",
     ],
     "NACIONAL": [
-        "https://www.emol.com/rss/rss.asp",  # Emol Noticias
-        "https://rss.app/feeds/QuPZil06i75x4J0b.xml", # 24 horas
-        "https://rss.app/feeds/KXD7V1vwEsU5FFoc.xml", # El mostrados
+        "https://www.emol.com/rss/rss.asp",
+        "https://rss.app/feeds/QuPZil06i75x4J0b.xml",
+        "https://rss.app/feeds/KXD7V1vwEsU5FFoc.xml",
     ],
     "INTERNACIONAL": [
-        "https://cnnespanol.cnn.com/feed/",  # CNN Español
-        "https://www.infobae.com/america/feed",  # Infobae América
-        "https://rss.app/feeds/tipE19EolhTiyutE.xml", # El País
-        "https://rss.app/feeds/gWh6Ibrm0CzSX2qZ.xml", # CNN 
+        "https://cnnespanol.cnn.com/feed/",
+        "https://www.infobae.com/america/feed",
+        "https://rss.app/feeds/tipE19EolhTiyutE.xml",
+        "https://rss.app/feeds/gWh6Ibrm0CzSX2qZ.xml",
     ],
     "DEPORTES": [
-        "https://www.ole.com.ar/rss/ultimas-noticias/",  # Olé
-        "https://www.marca.com/rss/portada.xml",  # Marca
-        "https://rss.app/feeds/24FkKxNQEXFjnS3c.xml",  # Diario AS Chile
-        "https://rss.app/feeds/mrcUDGUfBSKUZVCA.xml", # Red Gol
+        "https://www.ole.com.ar/rss/ultimas-noticias/",
+        "https://www.marca.com/rss/portada.xml",
+        "https://rss.app/feeds/24FkKxNQEXFjnS3c.xml",
+        "https://rss.app/feeds/mrcUDGUfBSKUZVCA.xml",
     ],
 }
 
@@ -154,6 +157,36 @@ def mark_posted(conn, link):
     conn.execute("INSERT OR IGNORE INTO posts (link_hash, link) VALUES (?,?)", (h, link))
     conn.commit()
 
+# ---------- Contador mensual de tweets ----------
+def _month_key_utc():
+    return datetime.datetime.utcnow().strftime("%Y-%m")
+
+def _ensure_month(conn):
+    mk = _month_key_utc()
+    curr = get_state(conn, "tw_month", "")
+    if curr != mk:
+        set_state(conn, "tw_month", mk)
+        set_state(conn, "tw_writes", "0")
+
+def get_tw_writes(conn):
+    _ensure_month(conn)
+    v = get_state(conn, "tw_writes", "0") or "0"
+    try:
+        return int(v)
+    except:
+        set_state(conn, "tw_writes", "0")
+        return 0
+
+def can_tweet(conn):
+    _ensure_month(conn)
+    count = get_tw_writes(conn)
+    return count < TW_MONTHLY_LIMIT and TW_ENABLED == "1"
+
+def record_tweet_success(conn):
+    c = get_tw_writes(conn) + 1
+    set_state(conn, "tw_writes", str(c))
+    return c
+
 # ---------- Limpieza de autor/firmas ----------
 BYLINE_PATTERNS = [
     r'^(?:por|by)\s+[^.,|:]{2,80}[:—–-]\s*',
@@ -169,7 +202,6 @@ def strip_byline_prefix(text: str) -> str:
         if t2 != t:
             t = t2.lstrip()
             break
-    # corta encabezados tipo "Publicado | Fecha ..." si aparecen antes del primer punto
     head = t[:220]
     if any(k in head.lower() for k in ('publicado', 'autor', 'redacción', 'agencia', 'fecha', 'hora', 'editor')):
         parts = re.split(r'(?:\s[|]\s|—|–|-){1,2}', head, maxsplit=1)
@@ -179,8 +211,6 @@ def strip_byline_prefix(text: str) -> str:
 
 def strip_leading_metadata(text: str) -> str:
     t = text.lstrip()
-
-    # Día + fecha [+ separador + publicado/actualizado/hora...]
     t = re.sub(
         r'^(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo)\s+\d{1,2}\s+de\s+\w+\s+de\s+\d{4}\s*'
         r'(?:\||—|–|-|,)?\s*(?:publicado.*?|actualizado.*?|a\s+las[:\s]*\d{1,2}:\d{2}.*?|[\w\s:.]+)?\s*',
@@ -188,14 +218,11 @@ def strip_leading_metadata(text: str) -> str:
         t,
         flags=re.IGNORECASE
     )
-
-    # Si aún quedan metadatos breves antes del primer punto, córtalos
     head = t[:260].lower()
     if any(k in head for k in ('publicado', 'actualizado', 'hora', 'redacción', 'agencia', 'editor')):
         first_dot = t.find('.')
         if 0 < first_dot < 220:
             t = t[first_dot+1:].lstrip()
-
     return t
 
 def strip_author_nodes(soup: BeautifulSoup) -> BeautifulSoup:
@@ -247,14 +274,10 @@ def summarize_html(html, max_words=1000):
     doc = Document(html)
     article_html = doc.summary()
     soup = BeautifulSoup(article_html, "html.parser")
-
-    # Elimina autores, imágenes y basura
     soup = strip_author_nodes(soup)
-    for bad in soup(["script", "style", "aside", "footer", "nav", 
+    for bad in soup(["script", "style", "aside", "footer", "nav",
                      "figure", "figcaption", "noscript", "img", "picture", "source"]):
         bad.decompose()
-
-    # Recorre párrafos y limpia texto
     total_words = 0
     clean_paragraphs = []
     for p in soup.find_all("p"):
@@ -270,7 +293,6 @@ def summarize_html(html, max_words=1000):
         clean_paragraphs.append(" ".join(words))
         if total_words >= max_words:
             break
-
     return clean_paragraphs
 
 def build_post_html(paragraphs):
@@ -278,28 +300,49 @@ def build_post_html(paragraphs):
         f"<p style='text-align:justify;'>{p}</p>" for p in paragraphs
     ) + "</div>"
 
-def tweet_news(title: str, url: str):
-    """Publica un tweet con el título y link. Si faltan credenciales, se salta."""
+# ---------- Tweets (v2) ----------
+def tweet_news(title: str, url: str) -> bool:
+    """
+    Publica un tweet por API v2.
+    Devuelve True si se publicó; False si faltan credenciales, está desactivado o falló.
+    """
+    if TW_ENABLED != "1":
+        print("[X] Tweet desactivado por TW_ENABLED.")
+        return False
+
     ck  = os.getenv("TW_CONSUMER_KEY")
     cs  = os.getenv("TW_CONSUMER_SECRET")
     at  = os.getenv("TW_ACCESS_TOKEN")
     ats = os.getenv("TW_ACCESS_TOKEN_SECRET")
-
     if not all([ck, cs, at, ats]):
         print("[X] Credenciales de X no configuradas; omito tweet.")
-        return
+        return False
+
+    text = f"{title}\n{url}"
+    if len(text) > 280:
+        text = text[:277] + "…"
 
     try:
-        auth = tweepy.OAuth1UserHandler(ck, cs, at, ats)
-        api = tweepy.API(auth)
-
-        text = f"{title}\n{url}"
-        if len(text) > 280:
-            text = text[:277] + "…"
-        api.update_status(text)
-        print(f"[X] Tweet enviado: {text}")
+        client = tweepy.Client(
+            consumer_key=ck,
+            consumer_secret=cs,
+            access_token=at,
+            access_token_secret=ats
+        )
+        resp = client.create_tweet(text=text)
+        ok = bool(getattr(resp, "data", None) and resp.data.get("id"))
+        if ok:
+            print(f"[X] Tweet enviado: id={resp.data.get('id')}")
+            return True
+        print("[X ERROR] create_tweet respondió sin id.")
+        return False
+    except tweepy.TweepyException as e:
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        print(f"[X ERROR] No se pudo publicar en X (status={code}): {e}")
+        return False
     except Exception as e:
         print(f"[X ERROR] No se pudo publicar en X: {e}")
+        return False
 
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
@@ -319,74 +362,50 @@ ACRONYMS = {
 }
 
 def normalize_title_case(raw: str) -> str:
-    """
-    Convierte el titular a 'oración' (Primera mayúscula y resto minúsculas),
-    preservando siglas. También vuelve a MAYÚSCULAS las siglas conocidas aunque
-    vengan en minúsculas. Detecta si el original venía TODO EN MAYÚSCULAS.
-    """
     if not raw:
         return raw
-
-    # Normaliza espacios
     orig = " ".join(raw.split())
-    base = orig.lower()                      # todo en minúsculas
+    base = orig.lower()
     if base:
-        base = base[0].upper() + base[1:]    # primera letra en mayúscula
-
+        base = base[0].upper() + base[1:]
     tokens = base.split()
-    orig_tokens = orig.split()               # para saber cómo venía cada palabra
+    orig_tokens = orig.split()
     fixed = []
-
     for i, tok in enumerate(tokens):
         pre = "".join(ch for ch in tok if ch in "¿¡(\"'“”‘’[{-")
         suf = "".join(ch for ch in tok if ch in ").,:;!?\"'”’]}-%")
         core = tok.strip("¿¡(\"'“”‘’[{-).,:;!?”’]}-%")
-
         orig_tok = orig_tokens[i] if i < len(orig_tokens) else tok
         orig_core = orig_tok.strip("¿¡(\"'“”‘’[{-).,:;!?”’]}-%")
         core_up = core.upper()
-
-        # Regla de siglas:
-        # 1) Si está en lista ACRONYMS -> MAYÚS
-        # 2) Si en el original era MAYÚS y parece sigla (2-5 letras) -> MAYÚS
         if (core_up in ACRONYMS) or (orig_core.isalpha() and 2 <= len(orig_core) <= 5 and orig_core.isupper()):
             new_core = core_up
         else:
-            new_core = core  # ya viene en minúsculas por 'base'
-
+            new_core = core
         fixed.append(f"{pre}{new_core}{suf}")
-
-    # Garantiza que la primera letra visible esté en mayúscula
     out = " ".join(fixed)
     for i, ch in enumerate(out):
         if ch.isalpha():
             out = out[:i] + out[i].upper() + out[i+1:]
             break
-
     return out
 
 # ---------- Publicación ----------
-def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
+def publish_n_for_category(conn, category_name, n=1, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
     publicados = 0
-
     for entry in pick_entry_for_category(category_name, max_per_feed=15):
         if publicados >= n:
             break
-
         title = normalize_title_case(entry.get("title") or "(Sin título)")
         link = entry.get("link")
         if not link or already_posted(conn, link):
             continue
-
-        # Descarga artículo
         try:
             html, final_url = fetch_url(link)
         except Exception as e:
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
-
-        # Imagen destacada (opcional)
         media_id = None
         try:
             cover = extract_og_image(html, final_url)
@@ -394,8 +413,6 @@ def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
                 media_id = wp_upload_media(to_jpeg_bytes(cover), "portada.jpg")
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
-
-        # Cuerpo (respetando párrafos)
         if POST_MODE == "full_html":
             soup = BeautifulSoup(Document(html).summary(), "html.parser")
             soup = strip_author_nodes(soup)
@@ -405,8 +422,6 @@ def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
         else:
             paragraphs = summarize_html(html, max_words=1000)
             content_html = build_post_html(paragraphs)
-
-        # Crear post y tuitear
         try:
             post_id, post_link = wp_create_post(
                 title, content_html,
@@ -417,10 +432,16 @@ def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
             mark_posted(conn, link)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # Tweet (con un pequeño respiro para no parecer spam)
+            # Tweet (si hay cupo y link)
             if publish_status == "publish" and post_link:
-                tweet_news(title, post_link)
-                time.sleep(5)
+                if can_tweet(conn):
+                    if tweet_news(title, post_link):
+                        new_count = record_tweet_success(conn)
+                        print(f"[X] Writes usados este mes: {new_count}/{TW_MONTHLY_LIMIT}")
+                        time.sleep(5)  # pausa solo tras éxito
+                else:
+                    used = get_tw_writes(conn)
+                    print(f"[X] Límite mensual alcanzado ({used}/{TW_MONTHLY_LIMIT}). Omite tweet.")
 
             publicados += 1
         except Exception as e:
@@ -431,26 +452,36 @@ def publish_n_for_category(conn, category_name, n=2, publish_status="publish"):
         print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
     else:
         print(f"[INFO] Publicados {publicados} en {category_name}.")
-
     return publicados
 
+def run_all_categories_once(publish_status="publish"):
+    """
+    Publica 1 noticia por categoría en una sola ejecución (ideal cron cada hora).
+    """
+    conn = init_db()
+    try:
+        total_pub = 0
+        for cat in CATEGORY_ORDER:
+            total_pub += publish_n_for_category(conn, cat, n=1, publish_status=publish_status)
+        used = get_tw_writes(conn)
+        print(f"[RESUMEN] Publicados total={total_pub}. Tweets usados este mes: {used}/{TW_MONTHLY_LIMIT}.")
+        return total_pub
+    finally:
+        conn.close()
+
+# (mantengo la función de rotación por si quieres usarla en otro cron)
 def run_rotating_once(publish_status="publish"):
     conn = init_db()
     try:
         idx = int(get_state(conn, "rotation_idx", "0")) % len(CATEGORY_ORDER)
         cat = CATEGORY_ORDER[idx]
-
-        # Publica 2 en la categoría de turno
         publicados = publish_n_for_category(conn, cat, n=2, publish_status=publish_status)
-
-        # avanza la rotación igual
         next_idx = (idx + 1) % len(CATEGORY_ORDER)
         set_state(conn, "rotation_idx", str(next_idx))
-
         return (publicados > 0), cat, idx, next_idx
     finally:
         conn.close()
 
 if __name__ == "__main__":
-    ok, cat, idx, nxt = run_rotating_once(publish_status="publish")
-    print(f"[ROTATION] idx={idx} cat={cat} -> next={nxt}")
+    # Ejecuta 1 por categoría (4 posts por corrida si tienes 4 categorías)
+    run_all_categories_once(publish_status="publish")
