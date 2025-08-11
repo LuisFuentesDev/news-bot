@@ -63,7 +63,7 @@ HEADERS_JSON = {"Accept": "application/json", "Content-Type": "application/json"
 HEADERS_BIN = {"Accept": "application/json", "User-Agent": "NewsBot/1.0"}
 AUTH = (WP_USER, WP_APP_PASSWORD)
 
-def make_seo_title(title: str, max_len=60) -> str:
+def make_seo_title(title: str, max_len=100) -> str:
     t = " ".join(title.split())
     return (t[:max_len-1] + "…") if len(t) > max_len else t
 
@@ -617,19 +617,19 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         # --- SEO ---
         seo_title = make_seo_title(title)
         meta_desc = make_meta_description(paragraphs_for_desc)
-        slug = slugify(seo_title)
+        slug = slugify(title)
 
         # --- Publicar en WP ---
         try:
             post_id, post_link = wp_create_post(
-                seo_title,                 # usar título SEO
-                content_html,
-                featured_media_id=media_id,
-                status=publish_status,
-                category_id=cat_id,
-                excerpt=meta_desc,         # meta description
-                slug=slug                  # slug consistente con el título SEO
-            )
+            title,              
+            content_html,
+            featured_media_id=media_id,
+            status=publish_status,
+            category_id=cat_id,
+            excerpt=meta_desc,
+            slug=slug
+        )
 
             # Marca como publicada usando la URL final normalizada
             mark_posted(conn, final_url_norm)
