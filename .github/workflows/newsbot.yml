@@ -2,11 +2,17 @@ name: NewsBot (cada hora)
 
 on:
   schedule:
-    - cron: "0 * * * *"        # cada hora (UTC)
-  workflow_dispatch:           # ejecutarlo manualmente
+    - cron: "0 * * * *"   # cada hora (UTC)
+  workflow_dispatch:
+    inputs:
+      migrar:
+        description: "Ejecutar migración de posts (normaliza/depura posted.db)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: write              # necesario para commitear posted.db
+  contents: read
 
 concurrency:
   group: newsbot-hourly
@@ -26,6 +32,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set MONTH env (UTC)
+        run: echo "MONTH=$(date -u +%Y-%m)" >> $GITHUB_ENV
+
+      - name: Restore posted.db cache
+        id: cache-posted
+        uses: actions/cache/restore@v4
+        with:
+          path: posted.db
+          key: posted-db-${{ env.MONTH }}-latest
+          restore-keys: |
+            posted-db-${{ env.MONTH }}-
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -37,26 +57,55 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # --- MIGRACIÓN (solo si migrar=true) ---
+      - name: Ejecutar migración (normalize/dedup)
+        if: ${{ inputs.migrar == true }}
+        env:
+          MIGRATE_POSTS: "1"
+        run: |
+          set -e
+          python automation_news.py > migrate.log 2>&1
+          echo "----- FIN MIGRACIÓN -----" >> migrate.log
+
+      - name: Subir log migración como artifact
+        if: ${{ inputs.migrar == true && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migrate-log
+          path: migrate.log
+          retention-days: 7
+
+      # Guardamos estado tras migración
+      - name: Compute db hash (post-migración o post-bot)
+        if: always()
+        run: echo "DBHASH=$(sha256sum posted.db | cut -d' ' -f1)" >> $GITHUB_ENV
+
+      - name: Save posted.db cache (con hash)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: posted.db
+          key: posted-db-${{ env.MONTH }}-${{ env.DBHASH }}
+
+      - name: Update 'latest' pointer del mes
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: posted.db
+          key: posted-db-${{ env.MONTH }}-latest
+
+      # --- BOT NORMAL (solo si NO estás migrando) ---
       - name: Ejecutar bot (guardar log)
+        if: ${{ inputs.migrar != true }}
         run: |
           set -e
           python automation_news.py > cron.log 2>&1
           echo "----- FIN EJECUCIÓN -----" >> cron.log
 
       - name: Subir log como artifact
-        if: always()
+        if: ${{ inputs.migrar != true && always() }}
         uses: actions/upload-artifact@v4
         with:
           name: cron-log
           path: cron.log
           retention-days: 7
-
-      - name: Commit estado (posted.db)
-        run: |
-          git config user.name "newsbot-bot"
-          git config user.email "newsbot-bot@users.noreply.github.com"
-          git add -f posted.db || true
-          git diff --cached --quiet || git commit -m "Update posted.db [ci skip]"
-
-      - name: Push
-        run: git push

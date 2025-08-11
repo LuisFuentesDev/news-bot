@@ -1,12 +1,14 @@
 # automation_news.py — rotación por categoría + limpieza autor + sin imágenes en cuerpo + tweet v2 con límite mensual
-import os, re, io, time, hashlib, sqlite3, datetime
+import os, re, io, time, hashlib, sqlite3, datetime as dt
 from urllib.parse import urljoin
 import requests, feedparser
 from bs4 import BeautifulSoup
 from readability import Document
 from PIL import Image
 from dotenv import load_dotenv
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import tweepy
+import shutil
 
 load_dotenv()
 
@@ -147,19 +149,40 @@ def set_state(conn, key, value):
                  (key, value))
     conn.commit()
 
+def _hash_link(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
 def already_posted(conn, link):
-    h = hashlib.sha256(link.encode("utf-8")).hexdigest()
-    cur = conn.execute("SELECT 1 FROM posts WHERE link_hash=?", (h,))
+    """
+    Devuelve True si el link ya fue publicado.
+    - Normaliza la URL antes de hashear.
+    - También verifica el hash 'raw' (compatibilidad hacia atrás con filas viejas).
+    """
+    norm = normalize_url(link or "")
+    h_norm = _hash_link(norm)
+    h_raw = _hash_link(link or "")
+    cur = conn.execute(
+        "SELECT 1 FROM posts WHERE link_hash IN (?,?)",
+        (h_norm, h_raw)
+    )
     return cur.fetchone() is not None
 
 def mark_posted(conn, link):
-    h = hashlib.sha256(link.encode("utf-8")).hexdigest()
-    conn.execute("INSERT OR IGNORE INTO posts (link_hash, link) VALUES (?,?)", (h, link))
+    """
+    Guarda solo la versión normalizada en la tabla (link y hash).
+    Así, a futuro todo queda consistente.
+    """
+    norm = normalize_url(link or "")
+    h_norm = _hash_link(norm)
+    conn.execute(
+        "INSERT OR IGNORE INTO posts (link_hash, link) VALUES (?,?)",
+        (h_norm, norm)
+    )
     conn.commit()
 
 # ---------- Contador mensual de tweets ----------
 def _month_key_utc():
-    return datetime.datetime.utcnow().strftime("%Y-%m")
+    return dt.datetime.utcnow().strftime("%Y-%m")
 
 def _ensure_month(conn):
     mk = _month_key_utc()
@@ -390,32 +413,121 @@ def normalize_title_case(raw: str) -> str:
             break
     return out
 
+def normalize_url(u: str) -> str:
+    if not u:
+        return u
+    s = urlsplit(u)
+    netloc = s.netloc.lower()
+    path = s.path or "/"
+    disallow = {
+        "utm_source","utm_medium","utm_campaign","utm_term","utm_content","utm_id",
+        "gclid","fbclid","mc_cid","mc_eid"
+    }
+    q = [(k, v) for k, v in parse_qsl(s.query, keep_blank_values=True) if k not in disallow]
+    query = urlencode(q)
+    return urlunsplit((s.scheme, netloc, path, query, ""))
+
+def migrate_posts_table(conn):
+    """
+    Normaliza y deduplica la tabla posts.
+    - Conserva la fila más antigua por cada URL normalizada.
+    - Requiere que existan normalize_url() y _hash_link().
+    """
+    # respaldo del archivo sqlite por si acaso
+    try:
+        ts = dt.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        shutil.copyfile(DB_PATH, f"{DB_PATH}.bak.{ts}")
+        print(f"[MIGRATE] Backup creado: {DB_PATH}.bak.{ts}")
+    except Exception as e:
+        print(f"[MIGRATE] No se pudo crear backup (continuo de todos modos): {e}")
+
+    cur = conn.cursor()
+    cur.execute("PRAGMA foreign_keys=OFF;")
+    conn.execute("BEGIN;")
+
+    try:
+        # Crear tabla nueva con el mismo esquema (y UNIQUE en link_hash)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posts_new(
+                id INTEGER PRIMARY KEY,
+                link_hash TEXT UNIQUE,
+                link TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Traer todas las filas actuales
+        rows = list(cur.execute("SELECT id, link, created_at FROM posts ORDER BY created_at ASC, id ASC;"))
+
+        inserted = 0
+        seen_hashes = set()
+
+        for _id, link, created_at in rows:
+            norm = normalize_url(link or "")
+            h = _hash_link(norm)
+            if h in seen_hashes:
+                continue  # ya insertamos una fila equivalente (nos quedamos con la más antigua)
+            seen_hashes.add(h)
+            cur.execute(
+                "INSERT OR IGNORE INTO posts_new(link_hash, link, created_at) VALUES (?,?,?);",
+                (h, norm, created_at)
+            )
+            if cur.rowcount > 0:
+                inserted += 1
+
+        old_count = cur.execute("SELECT COUNT(*) FROM posts;").fetchone()[0]
+        new_count = cur.execute("SELECT COUNT(*) FROM posts_new;").fetchone()[0]
+
+        # Reemplazar tabla
+        cur.execute("DROP TABLE posts;")
+        cur.execute("ALTER TABLE posts_new RENAME TO posts;")
+
+        conn.commit()
+        print(f"[MIGRATE] OK. Antes: {old_count} filas, después (normalizadas y únicas): {new_count}.")
+        # Limpieza del archivo
+        cur.execute("VACUUM;")
+        print("[MIGRATE] VACUUM completado.")
+    except Exception as e:
+        conn.rollback()
+        print(f"[MIGRATE] ERROR, se revirtió la migración: {e}")
+        print("[MIGRATE] Puedes restaurar el backup .bak creado si algo quedó mal.")
+        return False
+
+    return True
+
 # ---------- Publicación ----------
 def publish_one_for_category(conn, category_name, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
+
     for entry in pick_entry_for_category(category_name):
         title = normalize_title_case(entry.get("title") or "(Sin título)")
-        link = entry.get("link")
+
+        # Normaliza la URL del feed
+        link = normalize_url(entry.get("link"))
         if not link or already_posted(conn, link):
             continue
+
         try:
             html, final_url = fetch_url(link)
+            # Normaliza la URL final (canonical) después de redirecciones
+            final_url_norm = normalize_url(final_url or link)
         except Exception as e:
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
 
         media_id = None
         try:
-            cover = extract_og_image(html, final_url)
+            cover = extract_og_image(html, final_url_norm)
             if cover:
                 media_id = wp_upload_media(to_jpeg_bytes(cover), "portada.jpg")
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
 
+        # Genera el contenido
         if POST_MODE == "full_html":
             soup = BeautifulSoup(Document(html).summary(), "html.parser")
             soup = strip_author_nodes(soup)
-            for tag in soup.find_all(["img","picture","source","figure","figcaption"]):
+            for tag in soup.find_all(["img", "picture", "source", "figure", "figcaption"]):
                 tag.decompose()
             content_html = str(soup)
         else:
@@ -429,21 +541,24 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
                 status=publish_status,
                 category_id=cat_id
             )
-            mark_posted(conn, link)
+
+            # Marca como publicada usando la URL final normalizada
+            mark_posted(conn, final_url_norm)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # ---- Tweet después de publicar en WP ----
+            # Tweet si está habilitado
             if publish_status == "publish" and post_link:
                 if can_tweet(conn):
                     if tweet_news(title, post_link):
                         used = record_tweet_success(conn)
                         print(f"[X] Writes usados este mes: {used}/{TW_MONTHLY_LIMIT}")
-                        time.sleep(5)  # pausa solo tras éxito real
+                        time.sleep(5)
                 else:
                     used = get_tw_writes(conn)
                     print(f"[X] Límite mensual alcanzado ({used}/{TW_MONTHLY_LIMIT}). Omite tweet hasta reset mensual.")
 
             return True
+
         except Exception as e:
             print(f"[ERROR] Falló publicar '{title}' en {category_name}: {e}")
             continue
@@ -464,5 +579,14 @@ def run_rotating_once(publish_status="publish"):
         conn.close()
 
 if __name__ == "__main__":
+    # Ejecuta migración si se pide por env (una sola vez)
+    if os.getenv("MIGRATE_POSTS", "0") == "1":
+        conn = init_db()
+        try:
+            migrate_posts_table(conn)
+        finally:
+            conn.close()
+        raise SystemExit(0)
+
     ok, cat, idx, nxt = run_rotating_once(publish_status="publish")
     print(f"[ROTATION] idx={idx} cat={cat} -> next={nxt}")
