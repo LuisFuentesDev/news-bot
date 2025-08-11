@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import tweepy
 import shutil
 import unicodedata
+from html import unescape
 
 load_dotenv()
 
@@ -432,30 +433,55 @@ def normalize_title_case(raw: str) -> str:
     if not raw:
         return raw
     orig = " ".join(raw.split())
+
+    # ¿Está casi todo en MAYÚS?
+    letters = [c for c in orig if c.isalpha()]
+    upper_ratio = (sum(c.isupper() for c in letters) / (len(letters) or 1))
+    all_caps = upper_ratio >= 0.9
+
+    if not all_caps:
+        # respeta mayúsculas originales (nombres propios)
+        if orig and orig[0].islower():
+            return orig[0].upper() + orig[1:]
+        return orig
+
+    # Venía a gritos: pásalo a oración, preserva siglas conocidas
     base = orig.lower()
-    if base:
-        base = base[0].upper() + base[1:]
     tokens = base.split()
-    orig_tokens = orig.split()
     fixed = []
-    for i, tok in enumerate(tokens):
+    for tok in tokens:
         pre = "".join(ch for ch in tok if ch in "¿¡(\"'“”‘’[{-")
         suf = "".join(ch for ch in tok if ch in ").,:;!?\"'”’]}-%")
         core = tok.strip("¿¡(\"'“”‘’[{-).,:;!?”’]}-%")
-        orig_tok = orig_tokens[i] if i < len(orig_tokens) else tok
-        orig_core = orig_tok.strip("¿¡(\"'“”‘’[{-).,:;!?”’]}-%")
-        core_up = core.upper()
-        if (core_up in ACRONYMS) or (orig_core.isalpha() and 2 <= len(orig_core) <= 5 and orig_core.isupper()):
-            new_core = core_up
-        else:
-            new_core = core
-        fixed.append(f"{pre}{new_core}{suf}")
+        fixed_core = core.upper() if core.upper() in ACRONYMS else core
+        fixed.append(f"{pre}{fixed_core}{suf}")
+
     out = " ".join(fixed)
+    # mayúscula inicial
     for i, ch in enumerate(out):
         if ch.isalpha():
             out = out[:i] + out[i].upper() + out[i+1:]
             break
     return out
+
+def normalize_quotes(text: str) -> str:
+    if not text:
+        return text
+    t = unescape(text)  # &laquo; &raquo; &quot; → caracteres reales
+    # << >> tipografía "manual"
+    t = re.sub(r'<<\s*', '“', t)
+    t = re.sub(r'\s*>>', '”', t)
+    # Guillemets y comillas tipográficas → comillas rectas (o usa “ ” si prefieres)
+    repl = {
+        '«': '"', '»': '"',
+        '“': '"', '”': '"',
+        '„': '"', '‟': '"',
+        '‘': "'", '’': "'", '‹': "'", '›': "'",
+    }
+    t = ''.join(repl.get(ch, ch) for ch in t)
+    # limpia espacios repetidos
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
 
 def normalize_url(u: str) -> str:
     if not u:
@@ -544,22 +570,25 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
 
     for entry in pick_entry_for_category(category_name):
-        title = normalize_title_case(entry.get("title") or "(Sin título)")
+        # --- Título: limpia comillas raras y normaliza mayúsculas ---
+        raw_title = entry.get("title") or "(Sin título)"
+        raw_title = normalize_quotes(raw_title)
+        title = normalize_title_case(raw_title)
 
-        # Normaliza la URL del feed
+        # --- URL del feed (normalizada) + dedupe ---
         link = normalize_url(entry.get("link"))
         if not link or already_posted(conn, link):
             continue
 
+        # --- Descarga HTML y obtiene URL final (canonical/tras redirecciones) ---
         try:
             html, final_url = fetch_url(link)
-            # Normaliza la URL final (canonical) después de redirecciones
             final_url_norm = normalize_url(final_url or link)
         except Exception as e:
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
 
-        # Imagen destacada (redimensionada 1200x630 para X)
+        # --- Imagen destacada (redimensionada 1200x630) ---
         media_id = None
         try:
             cover = extract_og_image(html, final_url_norm)
@@ -568,40 +597,45 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
 
-        # --- Genera el contenido del post ---
-        if POST_MODE == "full_html":
-            soup = BeautifulSoup(Document(html).summary(), "html.parser")
-            soup = strip_author_nodes(soup)
-            for tag in soup.find_all(["img", "picture", "source", "figure", "figcaption"]):
-                tag.decompose()
-            content_html = str(soup)
-            # Para meta description tomamos los <p> ya limpios
-            paragraphs_for_desc = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-        else:
-            summary = summarize_html(html, max_words=1000)
-            content_html = build_post_html(summary)
-            paragraphs_for_desc = summary
+        # --- Contenido del post ---
+        try:
+            if POST_MODE == "full_html":
+                soup = BeautifulSoup(Document(html).summary(), "html.parser")
+                soup = strip_author_nodes(soup)
+                for tag in soup.find_all(["img", "picture", "source", "figure", "figcaption"]):
+                    tag.decompose()
+                content_html = str(soup)
+                paragraphs_for_desc = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+            else:
+                summary = summarize_html(html, max_words=1000)
+                content_html = build_post_html(summary)
+                paragraphs_for_desc = summary
+        except Exception as e:
+            print(f"[WARN] Error al procesar contenido de {final_url_norm}: {e}")
+            continue
 
-        # --- SEO: title/description/slug ---
+        # --- SEO ---
         seo_title = make_seo_title(title)
         meta_desc = make_meta_description(paragraphs_for_desc)
-        slug = slugify(title)
+        slug = slugify(seo_title)
 
+        # --- Publicar en WP ---
         try:
             post_id, post_link = wp_create_post(
-                seo_title, content_html,
+                seo_title,                 # usar título SEO
+                content_html,
                 featured_media_id=media_id,
                 status=publish_status,
                 category_id=cat_id,
-                excerpt=meta_desc,
-                slug=slug
+                excerpt=meta_desc,         # meta description
+                slug=slug                  # slug consistente con el título SEO
             )
 
             # Marca como publicada usando la URL final normalizada
             mark_posted(conn, final_url_norm)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # --- Tweet optimizado (hashtags + UTM) con límite mensual ---
+            # --- Tweet (con UTM + hashtags) respetando límite mensual ---
             if publish_status == "publish" and post_link:
                 if can_tweet(conn):
                     tweet_text = build_tweet_text(seo_title, post_link, category_name)
@@ -616,7 +650,7 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
             return True
 
         except Exception as e:
-            print(f"[ERROR] Falló publicar '{title}' en {category_name}: {e}")
+            print(f"[ERROR] Falló publicar '{seo_title}' en {category_name}: {e}")
             continue
 
     print(f"[INFO] No encontré noticia apta para {category_name} en esta pasada.")
