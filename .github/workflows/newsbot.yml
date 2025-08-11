@@ -39,13 +39,15 @@ jobs:
         run: echo "MONTH=$(date -u +%Y-%m)" >> $GITHUB_ENV
 
       - name: Restore posted.db cache
-        id: cache-posted
         uses: actions/cache/restore@v4
         with:
           path: posted.db
-          key: posted-db-${{ env.MONTH }}-latest
+          # key único por corrida (si no existe cae al restore-keys)
+          key: posted-db-${{ env.MONTH }}-${{ github.run_id }}
+          # usa el prefijo para traer el último cache del mes
           restore-keys: |
             posted-db-${{ env.MONTH }}-
+            posted-db-
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -75,25 +77,6 @@ jobs:
           path: migrate.log
           retention-days: 7
 
-      # Guardamos estado tras migración
-      - name: Compute db hash (post-migración o post-bot)
-        if: always()
-        run: echo "DBHASH=$(sha256sum posted.db | cut -d' ' -f1)" >> $GITHUB_ENV
-
-      - name: Save posted.db cache (con hash)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: posted.db
-          key: posted-db-${{ env.MONTH }}-${{ env.DBHASH }}
-
-      - name: Update 'latest' pointer del mes
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: posted.db
-          key: posted-db-${{ env.MONTH }}-latest
-
       # --- BOT NORMAL (solo si NO estás migrando) ---
       - name: Ejecutar bot (guardar log)
         if: ${{ inputs.migrar != true }}
@@ -109,3 +92,15 @@ jobs:
           name: cron-log
           path: cron.log
           retention-days: 7
+
+      # --- Guardar el posted.db ACTUALIZADO (después de migración o bot) ---
+      - name: Compute db hash
+        if: always()
+        run: echo "DBHASH=$(sha256sum posted.db | cut -d' ' -f1)" >> $GITHUB_ENV
+
+      - name: Save posted.db cache (con hash)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: posted.db
+          key: posted-db-${{ env.MONTH }}-${{ env.DBHASH }}
