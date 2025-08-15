@@ -11,6 +11,7 @@ import tweepy
 import shutil
 import unicodedata
 from html import unescape
+from openai import OpenAI
 
 load_dotenv()
 
@@ -86,6 +87,35 @@ HASHTAGS = {
     "DEPORTES": ["#Deportes"],
 }
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def rewrite_with_gpt(title, paragraphs):
+    """Usa OpenAI GPT para reescribir la noticia manteniendo el sentido."""
+    try:
+        prompt = (
+            f"Reescribe la siguiente noticia de forma más clara y atractiva para un público general, "
+            f"sin inventar información y manteniendo los datos reales. Devuélvelo en formato HTML con párrafos.\n\n"
+            f"Título: {title}\n\n"
+            f"Cuerpo:\n" + "\n".join(paragraphs)
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un periodista profesional que redacta noticias claras y concisas."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+
+        return resp.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"[WARN] No se pudo reescribir con GPT: {e}")
+        return build_post_html(paragraphs)  # fallback al original
+
+    
 def add_utm(u: str, **utm) -> str:
     s = urlsplit(u)
     q = dict(parse_qsl(s.query, keep_blank_values=True))
@@ -570,17 +600,14 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
 
     for entry in pick_entry_for_category(category_name):
-        # --- Título: limpia comillas raras y normaliza mayúsculas ---
         raw_title = entry.get("title") or "(Sin título)"
         raw_title = normalize_quotes(raw_title)
         title = normalize_title_case(raw_title)
 
-        # --- URL del feed (normalizada) + dedupe ---
         link = normalize_url(entry.get("link"))
         if not link or already_posted(conn, link):
             continue
 
-        # --- Descarga HTML y obtiene URL final (canonical/tras redirecciones) ---
         try:
             html, final_url = fetch_url(link)
             final_url_norm = normalize_url(final_url or link)
@@ -588,7 +615,6 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
             print(f"[WARN] No se pudo abrir {link}: {e}")
             continue
 
-        # --- Imagen destacada (redimensionada 1200x630) ---
         media_id = None
         try:
             cover = extract_og_image(html, final_url_norm)
@@ -597,45 +623,40 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] Imagen falló: {e}")
 
-        # --- Contenido del post ---
         try:
             if POST_MODE == "full_html":
                 soup = BeautifulSoup(Document(html).summary(), "html.parser")
                 soup = strip_author_nodes(soup)
                 for tag in soup.find_all(["img", "picture", "source", "figure", "figcaption"]):
                     tag.decompose()
-                content_html = str(soup)
                 paragraphs_for_desc = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
             else:
-                summary = summarize_html(html, max_words=1000)
-                content_html = build_post_html(summary)
-                paragraphs_for_desc = summary
+                paragraphs_for_desc = summarize_html(html, max_words=1000)
         except Exception as e:
             print(f"[WARN] Error al procesar contenido de {final_url_norm}: {e}")
             continue
 
-        # --- SEO ---
         seo_title = make_seo_title(title)
         meta_desc = make_meta_description(paragraphs_for_desc)
         slug = slugify(title)
 
-        # --- Publicar en WP ---
+        # 🔹 Reescribir con GPT antes de publicar
+        content_html = rewrite_with_gpt(seo_title, paragraphs_for_desc)
+
         try:
             post_id, post_link = wp_create_post(
-            title,              
-            content_html,
-            featured_media_id=media_id,
-            status=publish_status,
-            category_id=cat_id,
-            excerpt=meta_desc,
-            slug=slug
-        )
+                seo_title,
+                content_html,
+                featured_media_id=media_id,
+                status=publish_status,
+                category_id=cat_id,
+                excerpt=meta_desc,
+                slug=slug
+            )
 
-            # Marca como publicada usando la URL final normalizada
             mark_posted(conn, final_url_norm)
             print(f"[OK] {category_name} ({publish_status}): {post_link or post_id}")
 
-            # --- Tweet (con UTM + hashtags) respetando límite mensual ---
             if publish_status == "publish" and post_link:
                 if can_tweet(conn):
                     tweet_text = build_tweet_text(seo_title, post_link, category_name)

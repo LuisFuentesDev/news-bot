@@ -5,3 +5,4 @@ readability-lxml
 Pillow
 python-dotenv
 tweepy
+openai
