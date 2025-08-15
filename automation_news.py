@@ -407,10 +407,10 @@ def summarize_html(html, max_words=1000):
     return clean_paragraphs
 
 def build_post_html(paragraphs):
-    return "<div class='winf-body'>" + "".join(
-    f"<p style='text-align:justify;'>{p.strip()}</p>"
-    for p in paragraphs if p.strip()
-) + "</div>"
+    return "<div class='winf-body' style='font-size:18px; line-height:1.6;'> " + "".join(
+        f"<p style='text-align:justify; margin-top: 15px;'>{p.strip()}</p>"
+        for p in paragraphs if p.strip()
+    ) + "</div>"
 
 # ---------- Tweets (v2) ----------
 def tweet_news(text: str) -> bool:
