@@ -64,7 +64,7 @@ HEADERS_JSON = {"Accept": "application/json", "Content-Type": "application/json"
 HEADERS_BIN = {"Accept": "application/json", "User-Agent": "NewsBot/1.0"}
 AUTH = (WP_USER, WP_APP_PASSWORD)
 
-def make_seo_title(title: str, max_len=100) -> str:
+def make_seo_title(title: str, max_len=500) -> str:
     t = " ".join(title.split())
     return (t[:max_len-1] + "…") if len(t) > max_len else t
 
@@ -90,32 +90,36 @@ HASHTAGS = {
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def rewrite_with_gpt(title, paragraphs):
-    """Usa OpenAI GPT para reescribir la noticia manteniendo el sentido."""
+    """Usa OpenAI GPT para reescribir titular y cuerpo."""
     try:
         prompt = (
-            f"Reescribe la siguiente noticia de forma más clara y atractiva para un público general, "
-            f"sin inventar información y manteniendo los datos reales. Devuélvelo en formato HTML con párrafos.\n\n"
-            f"Título: {title}\n\n"
-            f"Cuerpo:\n" + "\n".join(paragraphs)
+            f"Reescribe el titular y el cuerpo de la siguiente noticia de forma clara, atractiva y profesional. "
+            f"No inventes información ni alteres datos. Devuelve el resultado en JSON con este formato:\n\n"
+            f"{{\"title\": \"Nuevo titular optimizado\", \"body\": \"<p>Primer párrafo...</p><p>Segundo párrafo...</p>\"}}\n\n"
+            f"Título original: {title}\n\n"
+            f"Cuerpo original:\n" + "\n".join(paragraphs)
         )
 
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Eres un periodista profesional que redacta noticias claras y concisas."},
+                {"role": "system", "content": "Eres un periodista profesional que redacta titulares y noticias claras, precisas y atractivas."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
             max_tokens=1000
         )
 
-        return resp.choices[0].message.content.strip()
+        import json
+        data = json.loads(resp.choices[0].message.content.strip())
+        new_title = data.get("title", title).strip()
+        new_body = data.get("body", build_post_html(paragraphs)).strip()
+        return new_title, new_body
 
     except Exception as e:
         print(f"[WARN] No se pudo reescribir con GPT: {e}")
-        return build_post_html(paragraphs)  # fallback al original
+        return title, build_post_html(paragraphs)  # fallback
 
-    
 def add_utm(u: str, **utm) -> str:
     s = urlsplit(u)
     q = dict(parse_qsl(s.query, keep_blank_values=True))
@@ -403,8 +407,9 @@ def summarize_html(html, max_words=1000):
 
 def build_post_html(paragraphs):
     return "<div class='winf-body'>" + "".join(
-        f"<p style='text-align:justify;'>{p}</p>" for p in paragraphs
-    ) + "</div>"
+    f"<p style='text-align:justify;'>{p.strip()}</p>"
+    for p in paragraphs if p.strip()
+) + "</div>"
 
 # ---------- Tweets (v2) ----------
 def tweet_news(text: str) -> bool:
@@ -642,6 +647,19 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
 
         # 🔹 Reescribir con GPT antes de publicar
         content_html = rewrite_with_gpt(seo_title, paragraphs_for_desc)
+
+        # --- Limpieza extra del contenido generado ---
+        # Elimina encabezado tipo "html" o bloques de código
+        content_html = re.sub(r'^\s*`{0,3}html\s*', '', content_html, flags=re.I)
+        content_html = re.sub(r'^<\s*html[^>]*>', '', content_html, flags=re.I)
+        content_html = re.sub(r'</\s*html\s*>$', '', content_html, flags=re.I)
+
+        # Elimina imágenes y párrafos vacíos
+        content_html = re.sub(r'<img[^>]*>', '', content_html, flags=re.I)
+        content_html = re.sub(r'(<p>\s*</p>)', '', content_html, flags=re.I)
+
+        # Limpia espacios extra
+        content_html = content_html.strip()
 
         try:
             post_id, post_link = wp_create_post(
