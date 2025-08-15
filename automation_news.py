@@ -664,7 +664,11 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         title = normalize_title_case(raw_title)
 
         link = normalize_url(entry.get("link"))
-        if not link or already_posted(conn, link):
+        if not link:
+            print(f"[SKIP] {category_name}: entrada sin link válido ({source_info})")
+            continue
+        if already_posted(conn, link):
+            print(f"[SKIP] {category_name}: duplicado ya publicado ({source_info}) -> {link}")
             continue
 
         try:
