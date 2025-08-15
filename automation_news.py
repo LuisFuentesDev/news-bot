@@ -29,26 +29,18 @@ TW_MONTHLY_LIMIT = int(os.getenv("TW_MONTHLY_LIMIT", "500"))  # Free plan: 500 w
 assert WP_URL and WP_USER and WP_APP_PASSWORD, "Faltan WP_URL/WP_USER/WP_APP_PASSWORD en .env"
 
 def fetch_from_newsapi(cat_name):
-    # Mapear categorías a búsquedas más específicas en español
     q_map = {
-        # Región de la Araucanía: incluimos varias ciudades/provincias y la palabra región
         "REGIONAL": (
             '"Araucanía" OR Temuco OR Villarrica OR Angol OR Pucón OR "Padre Las Casas" '
             'OR Cautín OR Malleco'
         ),
-
-        # Noticias nacionales en Chile, excluyendo deportes
         "NACIONAL": (
             'Chile AND NOT deportes AND NOT fútbol AND NOT tenis AND NOT básquetbol '
             'AND NOT "juegos panamericanos"'
         ),
-
-        # Noticias internacionales: excluimos Chile para evitar mezcla
         "INTERNACIONAL": (
             'NOT Chile AND (internacional OR "otros países" OR extranjero OR mundo)'
         ),
-
-        # Deportes en Chile o de chilenos en el mundo
         "DEPORTES": (
             'deportes AND (Chile OR chileno OR chilena OR "equipo chileno")'
         ),
@@ -68,10 +60,14 @@ def fetch_from_newsapi(cat_name):
     r.raise_for_status()
     data = r.json()
 
+    total = len(data.get("articles", []))
+    print(f"[NEWSAPI] {cat_name}: {total} artículos recibidos de NewsAPI (query='{query}')")
+
     for art in data.get("articles", []):
         yield {
             "title": art.get("title"),
             "link": art.get("url"),
+            "_source": "newsapi"
         }
 
 # ---- ORDEN DE ROTACIÓN ----
