@@ -407,7 +407,7 @@ def summarize_html(html, max_words=1000):
     return clean_paragraphs
 
 def build_post_html(paragraphs):
-    return "<div class='winf-body'>" + "".join(
+    return "<div class='winf-body' style='padding-top:30px; font-size:18px; line-height:1.6;'>" + "".join(
         f"<p style='text-align:justify; margin-top: 15px;'>{p.strip()}</p>"
         for p in paragraphs if p.strip()
     ) + "</div>"
