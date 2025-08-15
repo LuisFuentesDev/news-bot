@@ -492,16 +492,17 @@ def tweet_news(text: str) -> bool:
 
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
-    # Si hay NEWSAPI y devuelve algo, usar solo eso
     if NEWSAPI_KEY:
         newsapi_articles = list(fetch_from_newsapi(cat_name))
         if newsapi_articles:
+            print(f"[INFO] {cat_name}: {len(newsapi_articles)} noticias obtenidas desde NewsAPI")
             for art in newsapi_articles:
                 art["_source"] = "newsapi"
                 yield art
-            return  # 👈 termina aquí si hubo resultados
+            return
+        else:
+            print(f"[INFO] {cat_name}: sin resultados desde NewsAPI, usando RSS")
 
-    # Si no hubo resultados de NewsAPI, usar RSS
     feeds = FEEDS_BY_CATEGORY.get(cat_name, [])
     for feed in feeds:
         try:
