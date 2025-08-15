@@ -101,14 +101,15 @@ def rewrite_with_gpt(title, paragraphs):
         )
 
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Eres un periodista profesional que redacta titulares y noticias claras, precisas y atractivas."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Eres un periodista profesional que redacta titulares y noticias claras, precisas y atractivas."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7,
+        max_tokens=1000,
+        response_format={"type": "json_object"}
+)
 
         import json
         data = json.loads(resp.choices[0].message.content.strip())
@@ -118,7 +119,7 @@ def rewrite_with_gpt(title, paragraphs):
 
     except Exception as e:
         print(f"[WARN] No se pudo reescribir con GPT: {e}")
-        return title, build_post_html(paragraphs)  # fallback
+        return title, build_post_html(paragraphs or [])
 
 def add_utm(u: str, **utm) -> str:
     s = urlsplit(u)
@@ -645,8 +646,12 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         meta_desc = make_meta_description(paragraphs_for_desc)
         slug = slugify(title)
 
-        # 🔹 Reescribir con GPT antes de publicar
-        content_html = rewrite_with_gpt(seo_title, paragraphs_for_desc)
+        # 🔹 Reescribir con GPT antes de publicar (devuelve título y contenido)
+        new_title, content_html = rewrite_with_gpt(seo_title, paragraphs_for_desc)
+
+        # Actualizamos el SEO y slug con el nuevo título
+        seo_title = make_seo_title(new_title)
+        slug = slugify(new_title)
 
         # --- Limpieza extra del contenido generado ---
         # Elimina encabezado tipo "html" o bloques de código
@@ -657,6 +662,9 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         # Elimina imágenes y párrafos vacíos
         content_html = re.sub(r'<img[^>]*>', '', content_html, flags=re.I)
         content_html = re.sub(r'(<p>\s*</p>)', '', content_html, flags=re.I)
+
+        content_html = re.sub(r'^<\s*body[^>]*>', '', content_html, flags=re.I)
+        content_html = re.sub(r'</\s*body\s*>$', '', content_html, flags=re.I)
 
         # Limpia espacios extra
         content_html = content_html.strip()
