@@ -20,12 +20,59 @@ WP_USER = os.getenv("WP_USER")
 WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD")
 POST_MODE = os.getenv("POST_MODE", "summary")  # summary | full_html
 LANG = os.getenv("LANG", "es")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 
 # Tweets
 TW_ENABLED = os.getenv("TW_ENABLED", "1")                 # "1" para habilitar, "0" para desactivar sin tocar código
 TW_MONTHLY_LIMIT = int(os.getenv("TW_MONTHLY_LIMIT", "500"))  # Free plan: 500 writes/mes
 
 assert WP_URL and WP_USER and WP_APP_PASSWORD, "Faltan WP_URL/WP_USER/WP_APP_PASSWORD en .env"
+
+def fetch_from_newsapi(cat_name):
+    # Mapear categorías a búsquedas más específicas en español
+    q_map = {
+        # Región de la Araucanía: incluimos varias ciudades/provincias y la palabra región
+        "REGIONAL": (
+            '"Araucanía" OR Temuco OR Villarrica OR Angol OR Pucón OR "Padre Las Casas" '
+            'OR Cautín OR Malleco'
+        ),
+
+        # Noticias nacionales en Chile, excluyendo deportes
+        "NACIONAL": (
+            'Chile AND NOT deportes AND NOT fútbol AND NOT tenis AND NOT básquetbol '
+            'AND NOT "juegos panamericanos"'
+        ),
+
+        # Noticias internacionales: excluimos Chile para evitar mezcla
+        "INTERNACIONAL": (
+            'NOT Chile AND (internacional OR "otros países" OR extranjero OR mundo)'
+        ),
+
+        # Deportes en Chile o de chilenos en el mundo
+        "DEPORTES": (
+            'deportes AND (Chile OR chileno OR chilena OR "equipo chileno")'
+        ),
+    }
+
+    query = q_map.get(cat_name, "Chile")
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": query,
+        "language": "es",
+        "pageSize": 10,
+        "sortBy": "publishedAt",
+        "apiKey": NEWSAPI_KEY
+    }
+
+    r = requests.get(url, params=params, headers={"User-Agent": "NewsBot/1.0"})
+    r.raise_for_status()
+    data = r.json()
+
+    for art in data.get("articles", []):
+        yield {
+            "title": art.get("title"),
+            "link": art.get("url"),
+        }
 
 # ---- ORDEN DE ROTACIÓN ----
 CATEGORY_ORDER = ["REGIONAL", "NACIONAL", "INTERNACIONAL", "DEPORTES"]
@@ -445,6 +492,10 @@ def tweet_news(text: str) -> bool:
 
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
+    if NEWSAPI_KEY:
+        yield from fetch_from_newsapi(cat_name)
+        return
+    # Si no hay NEWSAPI_KEY, seguir con RSS
     feeds = FEEDS_BY_CATEGORY.get(cat_name, [])
     for feed in feeds:
         try:
