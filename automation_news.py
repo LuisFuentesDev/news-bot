@@ -646,28 +646,19 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         meta_desc = make_meta_description(paragraphs_for_desc)
         slug = slugify(title)
 
-        # 🔹 Reescribir con GPT antes de publicar (devuelve título y contenido)
-        new_title, content_html = rewrite_with_gpt(seo_title, paragraphs_for_desc)
-
-        # Actualizamos el SEO y slug con el nuevo título
-        seo_title = make_seo_title(new_title)
-        slug = slugify(new_title)
-
-        # --- Limpieza extra del contenido generado ---
-        # Elimina encabezado tipo "html" o bloques de código
-        content_html = re.sub(r'^\s*`{0,3}html\s*', '', content_html, flags=re.I)
-        content_html = re.sub(r'^<\s*html[^>]*>', '', content_html, flags=re.I)
-        content_html = re.sub(r'</\s*html\s*>$', '', content_html, flags=re.I)
-
-        # Elimina imágenes y párrafos vacíos
-        content_html = re.sub(r'<img[^>]*>', '', content_html, flags=re.I)
-        content_html = re.sub(r'(<p>\s*</p>)', '', content_html, flags=re.I)
-
-        content_html = re.sub(r'^<\s*body[^>]*>', '', content_html, flags=re.I)
-        content_html = re.sub(r'</\s*body\s*>$', '', content_html, flags=re.I)
-
-        # Limpia espacios extra
-        content_html = content_html.strip()
+        # 🔹 Reescribir con GPT y generar HTML con estilo anterior
+        try:
+            rewritten_text = rewrite_with_gpt(seo_title, paragraphs_for_desc)
+            
+            if isinstance(rewritten_text, str):
+                rewritten_paragraphs = [p.strip() for p in rewritten_text.split("\n") if p.strip()]
+            else:
+                rewritten_paragraphs = rewritten_text
+            
+            content_html = build_post_html(rewritten_paragraphs)
+        except Exception as e:
+            print(f"[WARN] No se pudo reescribir con GPT: {e}")
+            continue
 
         try:
             post_id, post_link = wp_create_post(
