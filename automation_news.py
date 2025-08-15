@@ -492,15 +492,22 @@ def tweet_news(text: str) -> bool:
 
 # ---------- Feeds ----------
 def pick_entry_for_category(cat_name, max_per_feed=8):
+    # Si hay NEWSAPI y devuelve algo, usar solo eso
     if NEWSAPI_KEY:
-        yield from fetch_from_newsapi(cat_name)
-        return
-    # Si no hay NEWSAPI_KEY, seguir con RSS
+        newsapi_articles = list(fetch_from_newsapi(cat_name))
+        if newsapi_articles:
+            for art in newsapi_articles:
+                art["_source"] = "newsapi"
+                yield art
+            return  # 👈 termina aquí si hubo resultados
+
+    # Si no hubo resultados de NewsAPI, usar RSS
     feeds = FEEDS_BY_CATEGORY.get(cat_name, [])
     for feed in feeds:
         try:
             d = feedparser.parse(feed)
             for entry in d.entries[:max_per_feed]:
+                entry["_source"] = f"rss:{feed}"
                 yield entry
         except Exception:
             continue
@@ -652,6 +659,9 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
     cat_id = get_or_create_category_id_exact(category_name)
 
     for entry in pick_entry_for_category(category_name):
+        source_info = entry.get("_source", "desconocido")
+        print(f"[INFO] Fuente de la noticia: {source_info}")
+
         raw_title = entry.get("title") or "(Sin título)"
         raw_title = normalize_quotes(raw_title)
         title = normalize_title_case(raw_title)
@@ -705,7 +715,6 @@ def publish_one_for_category(conn, category_name, publish_status="publish"):
         except Exception as e:
             print(f"[WARN] No se pudo reescribir con GPT: {e}")
             continue
-
         try:
             post_id, post_link = wp_create_post(
                 seo_title,
