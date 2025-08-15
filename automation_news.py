@@ -34,25 +34,20 @@ CATEGORY_ORDER = ["REGIONAL", "NACIONAL", "INTERNACIONAL", "DEPORTES"]
 FEEDS_BY_CATEGORY = {
     "REGIONAL": [
         "https://www.soychile.cl/rss",
-        "https://rss.app/feeds/CYNJPggNEkFxnne0.xml",
-        "https://rss.app/feeds/MAgTVCRXwboo1wpZ.xml",
     ],
     "NACIONAL": [
         "https://www.emol.com/rss/rss.asp",
-        "https://rss.app/feeds/QuPZil06i75x4J0b.xml",
-        "https://rss.app/feeds/KXD7V1vwEsU5FFoc.xml",
+        "https://www.diarioeldia.cl/rss/pais/",
     ],
     "INTERNACIONAL": [
         "https://cnnespanol.cnn.com/feed/",
         "https://www.infobae.com/america/feed",
-        "https://rss.app/feeds/tipE19EolhTiyutE.xml",
-        "https://rss.app/feeds/gWh6Ibrm0CzSX2qZ.xml",
+        "https://www.diarioeldia.cl/rss/mundo/",
     ],
     "DEPORTES": [
         "https://www.ole.com.ar/rss/ultimas-noticias/",
         "https://www.marca.com/rss/portada.xml",
-        "https://rss.app/feeds/24FkKxNQEXFjnS3c.xml",
-        "https://rss.app/feeds/mrcUDGUfBSKUZVCA.xml",
+        "https://www.diarioeldia.cl/rss/deportes/",
     ],
 }
 
